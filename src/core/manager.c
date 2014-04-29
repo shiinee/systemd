@@ -460,6 +460,10 @@ int manager_new(SystemdRunningAs running_as, Manager **_m) {
         if (r < 0)
                 goto fail;
 
+        m->enabled = enabled_context_new();
+        if (!m->enabled)
+                goto fail;
+
         r = sd_event_default(&m->event);
         if (r < 0)
                 goto fail;
@@ -793,6 +797,7 @@ void manager_free(Manager *m) {
         hashmap_free(m->watch_pids1);
         hashmap_free(m->watch_pids2);
         hashmap_free(m->watch_bus);
+        enabled_context_free(m->enabled);
 
         set_free(m->failed_units);
 

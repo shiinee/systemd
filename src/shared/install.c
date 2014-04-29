@@ -39,6 +39,7 @@
 #include "specifier.h"
 #include "install-printf.h"
 #include "special.h"
+#include "list.h"
 
 typedef struct {
         Hashmap *will_install;
@@ -548,6 +549,249 @@ static int find_symlinks_in_scope(
         }
 
         return 0;
+}
+
+EnabledContext *enabled_context_new(void)
+{
+        EnabledContext *ec;
+        int r;
+
+        ec = new0(EnabledContext, 1);
+        if (!ec)
+                return NULL;
+
+        r = hashmap_ensure_allocated(&ec->symlinks, string_hash_func, string_compare_func);
+        if (r < 0) {
+                free(ec);
+                return NULL;
+        }
+
+        r = hashmap_ensure_allocated(&ec->dirs, string_hash_func, string_compare_func);
+        if (r < 0) {
+                free(ec);
+                return NULL;
+        }
+
+        return ec;
+}
+
+void enabled_context_free(EnabledContext *ec)
+{
+        hashmap_free_free(ec->symlinks); // make sure that all strvs are _cleanup_free_?
+        ec->symlinks = NULL;
+        hashmap_free(ec->dirs);
+        ec->dirs = NULL;
+        free(ec);
+}
+
+static int enabled_context_build_cache_fd(
+        EnabledContext *ec,
+        int fd,
+        const char *path) {
+
+        int r = 0;
+        _cleanup_closedir_ DIR *d = NULL;
+        struct stat statbuf;
+        usec_t mtime;
+
+        assert(ec);
+        assert(fd >= 0);
+        assert(path);
+
+        d = fdopendir(fd);
+        if (!d) {
+                safe_close(fd);
+                return -errno;
+        }
+
+        r = fstat(fd, &statbuf);
+        if (r < 0) {
+                return r;
+        }
+        mtime = timespec_load(&statbuf.st_mtim);
+        hashmap_put(ec->dirs, path, &mtime);
+
+        for (;;) {
+                struct dirent *de;
+
+                errno = 0;
+                de = readdir(d);
+                if (!de && errno != 0)
+                        return -errno;
+
+                if (!de)
+                        return r;
+
+                if (ignore_file(de->d_name))
+                        continue;
+
+                dirent_ensure_type(d, de);
+
+                if (de->d_type == DT_DIR) {
+                        int nfd, q;
+                        _cleanup_free_ char *p = NULL;
+
+                        nfd = openat(fd, de->d_name, O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+                        if (nfd < 0) {
+                                if (errno == ENOENT)
+                                        continue;
+
+                                if (r == 0)
+                                        r = -errno;
+                                continue;
+                        }
+
+                        p = path_make_absolute(de->d_name, path);
+                        if (!p) {
+                                safe_close(nfd);
+                                return -ENOMEM;
+                        }
+
+                        /* This will close nfd, regardless whether it succeeds or not */
+                        q = enabled_context_build_cache_fd(ec, nfd, p);
+
+                        if (r == 0)
+                                r = q;
+
+                } else if (de->d_type == DT_LNK) {
+                        _cleanup_free_ char *p = NULL, *dest = NULL, *u = NULL;
+                        char **links;
+                        int q;
+
+                        /* Acquire symlink name */
+                        p = path_make_absolute(de->d_name, path);
+                        if (!p)
+                                return -ENOMEM;
+
+                        /* Acquire symlink destination */
+                        q = readlink_and_canonicalize(p, &dest);
+                        if (q < 0) {
+                                if (q == -ENOENT)
+                                        continue;
+
+                                if (r == 0)
+                                        r = q;
+                                continue;
+                        }
+                        u = basename(dest);
+
+                        /* If the symlink is not cached already, add it */
+                        links = hashmap_get(ec->symlinks, u);
+
+                        if (!strv_find(links, p)) {
+                                strv_push(&links, p);
+                                hashmap_put(ec->symlinks, u, links);
+                        }
+                }
+        }
+}
+
+static int enabled_context_build_cache(
+        EnabledContext *ec,
+        const char *dir) {
+
+        int fd;
+
+        assert(ec);
+        assert(dir);
+
+        fd = open(dir, O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        if (fd < 0) {
+                if (errno == ENOENT)
+                        return 0;
+                return -errno;
+        }
+
+        return enabled_context_build_cache_fd(ec, fd, dir);
+}
+
+static int enabled_context_lookup_state(
+        EnabledContext *ec,
+        UnitFileScope scope,
+        const char *name,
+        UnitFileState *state) {
+
+        _cleanup_lookup_paths_free_ LookupPaths paths = {};
+        char **links;
+        char *i;
+        char *p = NULL;
+        int r;
+
+        assert(ec);
+        assert(scope >= 0);
+        assert(scope < _UNIT_FILE_SCOPE_MAX);
+        assert(name);
+
+        r = lookup_paths_init_from_scope(&paths, scope);
+        if (r < 0)
+                return r;
+
+        /* Lookup unit name in the cache */
+        links = hashmap_get(ec->symlinks, name);
+
+        STRV_FOREACH_BACKWARDS(i, links) {
+                _cleanup_free_ char *dest = NULL;
+
+                /* Check whether the symlink still exists */
+                r = readlink_and_canonicalize(i, &dest);
+                if (r < 0) {
+                        if (r == -ENOENT)
+                                strv_remove(links, i);
+                        continue;
+                }
+
+                /* Check whether the symlink still points to the unit file */
+                if (!streq(name, basename(dest))) {
+                        strv_remove(links, i);
+                        continue;
+                }
+
+                /* If the symlink path is in scope, the unit is enabled */
+                STRV_FOREACH(p, paths.unit_path) {
+                        if (path_startswith(i, p)) {
+                                state = UNIT_FILE_ENABLED;
+                                return 1;
+                        }
+                }
+        }
+
+        return 0;
+}
+
+static int enabled_context_find_symlinks_in_scope(
+        EnabledContext *ec,
+        UnitFileScope scope,
+        const char *root_dir,
+        const char *name,
+        UnitFileState *state) {
+
+        _cleanup_free_ char *dir;
+        struct stat statbuf;
+        usec_t *mtime;
+        Iterator i;
+        int r;
+
+        assert(ec);
+        assert(scope >= 0);
+        assert(scope < _UNIT_FILE_SCOPE_MAX);
+        assert(name);
+
+        r = enabled_context_lookup_state(ec, scope, name, state);
+        if (r > 0)
+                return r;
+
+        /* We didn't find it; maybe the cache needs to be reloaded */
+        HASHMAP_FOREACH_KEY(mtime, dir, ec->dirs, i) {
+                r = stat(dir, &statbuf);
+                if (r < 0) {
+                        return r;
+                }
+
+                if (timespec_load(&statbuf.st_mtim) != *mtime)
+                        enabled_context_build_cache(ec, dir);
+        }
+
+        return enabled_context_lookup_state(ec, scope, name, state);
 }
 
 int unit_file_mask(
@@ -1656,11 +1900,11 @@ int unit_file_get_default(
 
         return -ENOENT;
 }
-
 UnitFileState unit_file_get_state(
                 UnitFileScope scope,
                 const char *root_dir,
-                const char *name) {
+                const char *name,
+                EnabledContext *ec) {
 
         _cleanup_lookup_paths_free_ LookupPaths paths = {};
         UnitFileState state = _UNIT_FILE_STATE_INVALID;
@@ -1721,7 +1965,11 @@ UnitFileState unit_file_get_state(
                         }
                 }
 
-                r = find_symlinks_in_scope(scope, root_dir, name, &state);
+                if (ec)
+                        r = enabled_context_find_symlinks_in_scope(ec, scope, root_dir, name, &state);
+                else
+                        r = find_symlinks_in_scope(scope, root_dir, name, &state);
+
                 if (r < 0)
                         return r;
                 else if (r > 0)
@@ -1890,7 +2138,8 @@ static void unitfilelist_free(UnitFileList **f) {
 int unit_file_get_list(
                 UnitFileScope scope,
                 const char *root_dir,
-                Hashmap *h) {
+                Hashmap *h,
+                EnabledContext *ec) {
 
         _cleanup_lookup_paths_free_ LookupPaths paths = {};
         char **i;
@@ -1984,7 +2233,11 @@ int unit_file_get_list(
                                 goto found;
                         }
 
-                        r = find_symlinks_in_scope(scope, root_dir, de->d_name, &f->state);
+                        if (ec)
+                                r = enabled_context_find_symlinks_in_scope(ec, scope, root_dir, de->d_name, &f->state);
+                        else
+                                r = find_symlinks_in_scope(scope, root_dir, de->d_name, &f->state);
+
                         if (r < 0)
                                 return r;
                         else if (r > 0) {

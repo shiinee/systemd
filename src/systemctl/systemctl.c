@@ -1339,7 +1339,7 @@ static int list_unit_files(sd_bus *bus, char **args) {
                 if (!h)
                         return log_oom();
 
-                r = unit_file_get_list(arg_scope, arg_root, h);
+                r = unit_file_get_list(arg_scope, arg_root, h, NULL);
                 if (r < 0) {
                         unit_file_list_free(h);
                         log_error("Failed to get unit file list: %s", strerror(-r));
@@ -5334,7 +5334,7 @@ static int unit_is_enabled(sd_bus *bus, char **args) {
                 STRV_FOREACH(name, names) {
                         UnitFileState state;
 
-                        state = unit_file_get_state(arg_scope, arg_root, *name);
+                        state = unit_file_get_state(arg_scope, arg_root, *name, NULL);
                         if (state < 0) {
                                 log_error("Failed to get unit file state for %s: %s", *name, strerror(-state));
                                 return state;

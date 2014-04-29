@@ -47,7 +47,7 @@ static int test_unit_file_get_set(void) {
         h = hashmap_new(string_hash_func, string_compare_func);
         assert(h);
 
-        r = unit_file_get_list(UNIT_FILE_SYSTEM, NULL, h);
+        r = unit_file_get_list(UNIT_FILE_SYSTEM, NULL, h, NULL);
         log_full(r == 0 ? LOG_INFO : LOG_ERR,
                  "unit_file_get_list: %s", strerror(-r));
         if (r < 0)

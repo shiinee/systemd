@@ -69,6 +69,7 @@ typedef enum ManagerExitCode {
 #include "unit-name.h"
 #include "exit-status.h"
 #include "show-status.h"
+#include "install.h"
 
 struct Manager {
         /* Note that the set of units we know of is allowed to be
@@ -78,6 +79,7 @@ struct Manager {
         /* Active jobs and units */
         Hashmap *units;  /* name string => Unit object n:1 */
         Hashmap *jobs;   /* job id => Job object 1:1 */
+        EnabledContext *enabled; /* name string => is enabled */
 
         /* To make it easy to iterate through the units of a specific
          * type we maintain a per type linked list */

@@ -73,6 +73,11 @@ typedef struct {
         char **required_by;
 } InstallInfo;
 
+typedef struct {
+        Hashmap* symlinks;
+        Hashmap* dirs;
+} EnabledContext;
+
 int unit_file_enable(UnitFileScope scope, bool runtime, const char *root_dir, char **files, bool force, UnitFileChange **changes, unsigned *n_changes);
 int unit_file_disable(UnitFileScope scope, bool runtime, const char *root_dir, char **files, UnitFileChange **changes, unsigned *n_changes);
 int unit_file_reenable(UnitFileScope scope, bool runtime, const char *root_dir, char **files, bool force, UnitFileChange **changes, unsigned *n_changes);
@@ -83,9 +88,9 @@ int unit_file_unmask(UnitFileScope scope, bool runtime, const char *root_dir, ch
 int unit_file_set_default(UnitFileScope scope, const char *root_dir, const char *file, bool force, UnitFileChange **changes, unsigned *n_changes);
 int unit_file_get_default(UnitFileScope scope, const char *root_dir, char **name);
 
-UnitFileState unit_file_get_state(UnitFileScope scope, const char *root_dir, const char *filename);
+UnitFileState unit_file_get_state(UnitFileScope scope, const char *root_dir, const char *filename, EnabledContext *ec);
 
-int unit_file_get_list(UnitFileScope scope, const char *root_dir, Hashmap *h);
+int unit_file_get_list(UnitFileScope scope, const char *root_dir, Hashmap *h, EnabledContext *ec);
 
 void unit_file_list_free(Hashmap *h);
 void unit_file_changes_free(UnitFileChange *changes, unsigned n_changes);
@@ -97,3 +102,7 @@ UnitFileState unit_file_state_from_string(const char *s) _pure_;
 
 const char *unit_file_change_type_to_string(UnitFileChangeType s) _const_;
 UnitFileChangeType unit_file_change_type_from_string(const char *s) _pure_;
+
+EnabledContext *enabled_context_new(void);
+void enabled_context_free(EnabledContext *ec);
+

@@ -1318,7 +1318,7 @@ static int method_list_unit_files(sd_bus *bus, sd_bus_message *message, void *us
         if (!h)
                 return -ENOMEM;
 
-        r = unit_file_get_list(m->running_as == SYSTEMD_SYSTEM ? UNIT_FILE_SYSTEM : UNIT_FILE_USER, NULL, h);
+        r = unit_file_get_list(m->running_as == SYSTEMD_SYSTEM ? UNIT_FILE_SYSTEM : UNIT_FILE_USER, NULL, h, m->enabled);
         if (r < 0)
                 goto fail;
 
@@ -1367,7 +1367,7 @@ static int method_get_unit_file_state(sd_bus *bus, sd_bus_message *message, void
 
         scope = m->running_as == SYSTEMD_SYSTEM ? UNIT_FILE_SYSTEM : UNIT_FILE_USER;
 
-        state = unit_file_get_state(scope, NULL, name);
+        state = unit_file_get_state(scope, NULL, name, m->enabled);
         if (state < 0)
                 return state;
 
